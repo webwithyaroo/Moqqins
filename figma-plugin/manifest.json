@@ -1,0 +1,11 @@
+{
+  "name": "Moqqins MVP",
+  "id": "moqqins-mvp",
+  "api": "1.0.0",
+  "main": "dist/code.js",
+  "documentAccess": "dynamic-page",
+  "networkAccess": {
+    "allowedDomains": ["none"]
+  },
+  "editorType": ["figma"]
+}
