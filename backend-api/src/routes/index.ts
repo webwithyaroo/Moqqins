@@ -1,43 +1,72 @@
 import { Router } from "express";
+import { ProjectModel } from "../models/Project";
+import { VersionModel } from "../models/Version";
 
 const router = Router();
 
-// Test endpoint to verify API is working
-router.get("/test", (req, res) => {
+// API info endpoint
+router.get("/", (req, res) => {
   res.json({
-    message: "Moqqins API is working perfectly!",
-    timestamp: new Date().toISOString(),
+    name: "Moqqins API",
     version: "1.0.0",
+    description: "Version control and collaboration for design teams",
+    status: "active",
+    database: "SQLite connected",
+    endpoints: {
+      health: "/health",
+      projects: "/api/v1/projects",
+      versions: "/api/v1/projects/:id/versions",
+      test: "/api/v1/test",
+    },
+    timestamp: new Date().toISOString(),
   });
 });
 
-// Projects endpoints (mock data for now)
-router.post("/projects", (req, res) => {
+// Test endpoint for plugin connection
+router.get("/test", (req, res) => {
+  res.json({
+    message: "Moqqins API with database is working perfectly!",
+    timestamp: new Date().toISOString(),
+    connection: "successful",
+    database: "connected",
+    ready_for_plugin: true,
+  });
+});
+
+// Projects endpoints
+router.post("/projects", async (req, res) => {
   try {
     const { name, figma_file_id, description } = req.body;
 
-    // Validate required fields
     if (!name) {
       return res.status(400).json({
-        error: "Project name is required",
+        error: "Bad Request",
+        message: "Project name is required",
       });
     }
 
-    // Create mock project (we'll use database tomorrow)
-    const project = {
-      id: "proj_" + Date.now(),
-      name: name,
-      figma_file_id: figma_file_id || null,
-      description: description || null,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-      version_count: 0,
-    };
+    // Check if project with this Figma ID already exists
+    if (figma_file_id) {
+      const existingProject = await ProjectModel.findByFigmaId(figma_file_id);
+      if (existingProject) {
+        console.log(
+          "Returning existing project for Figma file:",
+          figma_file_id
+        );
+        return res.json(existingProject);
+      }
+    }
 
-    console.log("Created project:", project);
+    const project = await ProjectModel.create({
+      name,
+      figma_file_id,
+      description,
+    });
+
+    console.log("✅ Created new project:", project.id);
     res.status(201).json(project);
   } catch (error) {
-    console.error("Error creating project:", error);
+    console.error("❌ Error creating project:", error);
     res.status(500).json({
       error: "Failed to create project",
       message: (error as Error).message,
@@ -45,38 +74,25 @@ router.post("/projects", (req, res) => {
   }
 });
 
-// Get all projects
-router.get("/projects", (req, res) => {
+router.get("/projects", async (req, res) => {
   try {
-    // Mock projects list (we'll get from database tomorrow)
-    const projects = [
-      {
-        id: "proj_123",
-        name: "Mobile App Redesign",
-        figma_file_id: "figma_123",
-        description: "Complete redesign of our mobile application",
-        created_at: "2024-01-15T10:00:00Z",
-        updated_at: "2024-01-16T15:30:00Z",
-        version_count: 5,
-      },
-      {
-        id: "proj_124",
-        name: "Website Landing Page",
-        figma_file_id: "figma_124",
-        description: "New landing page for product launch",
-        created_at: "2024-01-16T14:30:00Z",
-        updated_at: "2024-01-17T09:15:00Z",
-        version_count: 3,
-      },
-    ];
+    const projects = await ProjectModel.findAll();
+
+    // Add version count to each project
+    const projectsWithCounts = await Promise.all(
+      projects.map(async (project) => {
+        const versionCount = await ProjectModel.getVersionCount(project.id);
+        return { ...project, version_count: versionCount };
+      })
+    );
 
     res.json({
-      projects: projects,
-      total: projects.length,
+      projects: projectsWithCounts,
+      total: projectsWithCounts.length,
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
-    console.error("Error fetching projects:", error);
+    console.error("❌ Error fetching projects:", error);
     res.status(500).json({
       error: "Failed to fetch projects",
       message: (error as Error).message,
@@ -84,25 +100,29 @@ router.get("/projects", (req, res) => {
   }
 });
 
-// Get single project by ID
-router.get("/projects/:id", (req, res) => {
+router.get("/projects/:id", async (req, res) => {
   try {
     const { id } = req.params;
+    const project = await ProjectModel.findById(id);
 
-    // Mock project data (we'll get from database tomorrow)
-    const project = {
-      id: id,
-      name: "Mock Project",
-      figma_file_id: "figma_" + id,
-      description: "This is a mock project for testing",
-      created_at: "2024-01-15T10:00:00Z",
-      updated_at: new Date().toISOString(),
-      version_count: 2,
-    };
+    if (!project) {
+      return res.status(404).json({
+        error: "Not Found",
+        message: "Project not found",
+      });
+    }
 
-    res.json(project);
+    // Add version count and stats
+    const versionCount = await ProjectModel.getVersionCount(project.id);
+    const stats = await VersionModel.getProjectStats(project.id);
+
+    res.json({
+      ...project,
+      version_count: versionCount,
+      stats,
+    });
   } catch (error) {
-    console.error("Error fetching project:", error);
+    console.error("❌ Error fetching project:", error);
     res.status(500).json({
       error: "Failed to fetch project",
       message: (error as Error).message,
@@ -110,27 +130,35 @@ router.get("/projects/:id", (req, res) => {
   }
 });
 
-// Versions endpoints (mock data for now)
-router.post("/projects/:projectId/versions", (req, res) => {
+// Versions endpoints
+router.post("/projects/:projectId/versions", async (req, res) => {
   try {
     const { projectId } = req.params;
-    const { message, author, document_data } = req.body;
+    const { message, author, document_data, is_auto_save } = req.body;
 
-    // Create mock version
-    const version = {
-      id: "ver_" + Date.now(),
+    // Verify project exists
+    const project = await ProjectModel.findById(projectId);
+    if (!project) {
+      return res.status(404).json({
+        error: "Not Found",
+        message: "Project not found",
+      });
+    }
+
+    const version = await VersionModel.create({
       project_id: projectId,
-      version_number: 1,
-      message: message || "Version created",
-      author: author || "Anonymous User",
-      document_data: document_data || null,
-      created_at: new Date().toISOString(),
-    };
+      message: message || "Version created via Moqqins",
+      author: author || "Unknown User",
+      document_data,
+      is_auto_save: is_auto_save || false,
+    });
 
-    console.log("Created version:", version);
+    console.log(
+      `✅ Created version ${version.version_number} for project ${projectId}`
+    );
     res.status(201).json(version);
   } catch (error) {
-    console.error("Error creating version:", error);
+    console.error("❌ Error creating version:", error);
     res.status(500).json({
       error: "Failed to create version",
       message: (error as Error).message,
@@ -138,41 +166,54 @@ router.post("/projects/:projectId/versions", (req, res) => {
   }
 });
 
-// Get versions for a project
-router.get("/projects/:projectId/versions", (req, res) => {
+router.get("/projects/:projectId/versions", async (req, res) => {
   try {
     const { projectId } = req.params;
 
-    // Mock versions list
-    const versions = [
-      {
-        id: "ver_001",
-        project_id: projectId,
-        version_number: 2,
-        message: "Updated button colors and spacing",
-        author: "Sarah Designer",
-        created_at: "2024-01-17T15:30:00Z",
-      },
-      {
-        id: "ver_002",
-        project_id: projectId,
-        version_number: 1,
-        message: "Initial design version",
-        author: "Mike Designer",
-        created_at: "2024-01-15T10:00:00Z",
-      },
-    ];
+    // Verify project exists
+    const project = await ProjectModel.findById(projectId);
+    if (!project) {
+      return res.status(404).json({
+        error: "Not Found",
+        message: "Project not found",
+      });
+    }
+
+    const versions = await VersionModel.findByProject(projectId);
 
     res.json({
-      versions: versions,
+      versions,
       total: versions.length,
       project_id: projectId,
+      project_name: project.name,
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
-    console.error("Error fetching versions:", error);
+    console.error("❌ Error fetching versions:", error);
     res.status(500).json({
       error: "Failed to fetch versions",
+      message: (error as Error).message,
+    });
+  }
+});
+
+router.get("/versions/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const version = await VersionModel.findById(id);
+
+    if (!version) {
+      return res.status(404).json({
+        error: "Not Found",
+        message: "Version not found",
+      });
+    }
+
+    res.json(version);
+  } catch (error) {
+    console.error("❌ Error fetching version:", error);
+    res.status(500).json({
+      error: "Failed to fetch version",
       message: (error as Error).message,
     });
   }
